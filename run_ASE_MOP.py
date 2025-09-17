@@ -11,6 +11,9 @@ from scipy.optimize import curve_fit
 from numba import jit, njit, prange
 from e3nn.util import jit
 
+#this should be version from 
+#https://github.com/edwardsmith999/ase
+#which makes minor changes to interface to get fij
 sys.path.insert(1, '/home/es205/codes/ase')
 from ase import units
 from ase.md.verlet import VelocityVerlet
@@ -22,8 +25,9 @@ from ase.io import read, write, vasp
 from ase.md import MDLogger
 from ase.optimize import BFGS
 
+#This should be version from https://github.com/edwardsmith999/mace
+#currently, which adapts and adds fij support
 sys.path.insert(1, '/home/es205/codes/MACE/mace/')
-#sys.path.insert(1, '/home/es205/codes/MACE/mace_development/mace_current/mace/')_
 from mace.calculators import MACECalculator, mace_anicc
 from mace.calculators import foundations_models as fd
 
@@ -328,50 +332,6 @@ def get_force(atoms, pairwise=True):
 
         return forces
 
-
-
-#def align_force(fij, r, cell, pbc):
-#
-#
-#    # Enforce force to act along rij
-#    rij, rij_mag = get_distances(r, cell=cell, pbc=pbc)
-
-#    rhat = rij / np.maximum(rij_mag[:, :, np.newaxis], 1e-12)
-#    proj_magnitude = np.einsum("ijk,ijk->ij", fij, rhat)  # shape (N, N)
-#    fij_proj = proj_magnitude[:, :, np.newaxis] * rhat  # shape (N, N, 3)
-
-#    #Attempt to correct force imbalance
-#    pairs = [(i,j)
-#             for i in range(N) for j in range(i+1,N)
-#             if rij_mag[i,j] > 0.0]
-#    M = len(pairs)
-
-#    # Flattened error vector Δ: shape (3N,)
-#    Delta = (fij - fij_proj).reshape(3*N)
-
-#    # Build G:
-#    G = np.zeros((3*N, M))
-#    for k,(i,j) in enumerate(pairs):
-#        G[3*i:3*i+3, k] =  rhat[i,j]
-#        G[3*j:3*j+3, k] = -rhat[i,j]
-
-#    #Solve matrix
-#    B, *_ = np.linalg.lstsq(G, Delta, rcond=None)   # β.shape == (M,)
-
-#    f_corr = np.zeros((N,N,3))
-#    for k,(i,j) in enumerate(pairs):
-#        b = B[k]
-#        f_corr[i,j] =  b * rhat[i,j]
-#        f_corr[j,i] = -b * rhat[i,j]
-
-#    fij_corrected = f_proj + f_corr
-
-#    # 1) antisymmetry still holds
-#    assert np.allclose(fij_corrected, -fij_corrected.swapaxes(0,1))
-
-#    # 2) net forces match original
-#    assert np.allclose(fij_corrected.sum(axis=1), atoms.calc.results["forces"])
-
 AtomDict = {"Zr":40, "O":8, "H":1}
 
 Nbins = 400
@@ -405,7 +365,7 @@ Lz = cell[2][2]
 binrange = np.linspace(0, Lz, Nbins)
 
 #Define mace calculator
-modelpath = "/home/es205/codes/MACE/mace/mace/calculators/foundations_models/"
+modelpath = "./foundations_models/"
 atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
                           device='cuda', 
                           enable_cueq=True, 
@@ -553,43 +513,6 @@ for t in range(nsteps):
                       +fij[:,:,1]*v_next[:,1] 
                       +fij[:,:,2]*v_next[:,2])
 
-    elif fijcalc == "test_fdiff":
-        fij = np.zeros([N,N,3])
-        for i in range(3):
-            fij[:,:,i] = np.subtract.outer(f[:,i], f[:,i])
-        fijvi = np.zeros([fij.shape[0], fij.shape[1]])
-        fijvi[:,:] = ( fij[:,:,0]*v_next[:,0] 
-                      +fij[:,:,1]*v_next[:,1] 
-                      +fij[:,:,2]*v_next[:,2])
-
-#    elif fijcalc == "inline":
-#        model = atoms.calc.models[0]
-#        batch_base = atoms.calc._atoms_to_batch(atoms)
-#        batch = atoms.calc._clone_batch(batch_base)
-#        out = model(batch.to_dict(), compute_stress=True, training=True)
-#        total_energy = out['energy'].sum()  # or sum of node energies
-#        if pairwise:
-#            rij = out["vectors"]
-#            grad_rij = torch.autograd.grad(total_energy, rij, retain_graph=True)[0].to("cpu")
-#            dense = torch.zeros((N, N, grad_rij.shape[1]))
-#            sender, receiver = batch["edge_index"]
-#            dense[sender, receiver] = grad_rij
-
-#            fij = -2.0*dense.to("cpu").numpy()
-#            fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
-#            fij[:,:,1] = 0.5*(fij[:,:,1] - fij[:,:,1].T)
-#            fij[:,:,2] = 0.5*(fij[:,:,2] - fij[:,:,2].T)
-
-#            assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
-
-#            fijvi = np.zeros([fij.shape[0], fij.shape[1]])
-#            fijvi[:,:] = ( fij[:,:,0]*v_next[:,0] 
-#                          +fij[:,:,1]*v_next[:,1] 
-#                          +fij[:,:,2]*v_next[:,2])
-#        else:
-#            positions = batch['positions'].requires_grad_(True)
-#            forces = -torch.autograd.grad(total_energy, positions, retain_graph=True)[0]
-
     elif fijcalc == "dUidrj":
         model = atoms.calc.models[0]
         batch_base = atoms.calc._atoms_to_batch(atoms)
@@ -606,58 +529,6 @@ for t in range(nsteps):
         #Final call with no retain graph to free memory
         dUidrj[N-1,:,:] = torch.autograd.grad(node_energy[N-1], positions, 
                                             retain_graph=False, only_inputs=True)[0]
-
-        #Copy to CPU and delete GPU
-        dUidrj = dUidrj.cpu().numpy()
-        
-        #This ensures Newton's 3rd law but is not consistent with energy        
-        #fij = -(dUidrj - dUidrj.transpose(1, 0, 2))
-        #assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
-
-        #This won't pass the assert but is consistent with energy term
-        fij = -2.*dUidrj
-        fijvi = np.zeros([fij.shape[0], fij.shape[1]])
-        fijvi[:,:] = -2.*(  dUidrj[:,:,0]*v_next[:,0] 
-                          + dUidrj[:,:,1]*v_next[:,1] 
-                          + dUidrj[:,:,2]*v_next[:,2])
-
-
-    elif fijcalc == "dUidrj_accelerated":
-        model = atoms.calc.models[0]
-        batch_base = atoms.calc._atoms_to_batch(atoms)
-        batch = atoms.calc._clone_batch(batch_base)
-        out = model(batch.to_dict(), compute_stress=True, training=True)
-
-        #Get dUi/drj as shown in Marcel et al
-        positions = batch['positions']
-        node_energy = out["node_energy"]
-        total_energy = out['energy'].sum()  # or sum of node energies
-
-        Raux = positions.detach()         # detached from graph
-        # Compute B (3-vector): Raux.T @ U_sc
-        B = (Raux * node_energy.unsqueeze(1)).sum(dim=0)   # shape (3,)
-        v_t = torch.tensor(v_next, device=positions.device, dtype=positions.dtype)
-
-        # 5) First term: T1_k = sum_J (dB_k/dR_J) · v_J  for k=0,1,2
-        # Implementation: for k in {0,1,2} compute grad(B[k], pos_unf) -> (N_unf,3), dot with vel and sum over J
-        T1_components = []
-        for k in range(3):
-            bk = B[k]                                    # scalar
-            grads = torch.autograd.grad(bk, positions, retain_graph=True, create_graph=False)[0]  # (N_unf,3)
-            # contraction with velocities: sum_J grads[J] dot v_J
-            T1_k = (grads * v_t).sum(dim=1).sum()       # scalar
-            T1_components.append(T1_k)
-        T1 = torch.stack(T1_components)                 # shape (3,)
-
-        # 6) Second term: T2 = sum_J R_J * (dU_total/dR_J ⋅ v_J)
-        # compute grad of total energy w.r.t pos_unf
-        grad_U = torch.autograd.grad(total_energy, positions, retain_graph=True, create_graph=False)[0]  # (N_unf,3)
-        # per-atom scalar = (grad_U[J] ⋅ v_J)
-        per_atom_inner = (grad_U * v_t).sum(dim=1)     # (N_unf,)
-        # multiply by R_J and sum over J to get vector
-        T2 = (positions * per_atom_inner.unsqueeze(1)).sum(dim=0)  # (3,)
-
-        Jint = T1 - T2
 
         #Copy to CPU and delete GPU
         dUidrj = dUidrj.cpu().numpy()
@@ -837,12 +708,6 @@ if Nevery == 1:
     axs[0].plot(dmvdt[:], label=r"$\frac{d}{dt} \rho u $"); 
     axs[0].plot(Fds_c[:-1]-dmvdt[:]-Fds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
-
-    #Plot surface crossings
-#    plt.plot(Fds_c[:-1]-dmvdt[:], label=r"$\Pi^c$ -\frac{d}{dt} \rho u $"); 
-#    plt.plot(Fds_k[1:-1]/units.fs, "o", label="$\Pi^k$"); plt.legend(); 
-#    plt.legend()
-#    plt.show()
 
     #Plot CV energy time evolution
     Eds_c = E_c[:,binno+1,0]-E_c[:,binno,0]
