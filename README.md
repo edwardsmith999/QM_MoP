@@ -4,13 +4,13 @@ This repository contains code to calculate the Method of Planes (MoP) stress in 
 
 The validaity of this approach is demonstrated by showing the MoP pressure respects static equilibirum near a liquid-solid interface (a test which the virial or IK1 form fails),
 
-![Plot of near wall pressure](https://github.com/edwardsmith999/QM_MoP/blob/[branch]/image.jpg?raw=true)
+![Plot of near wall pressure](https://github.com/edwardsmith999/QM_MoP/blob/main/figures/stress_in_channel.png)
 
  as well as conservation in an arbitary control volume between two planes (a test for validity that can be used in any system).
 This can be shown for momentum, which validates the measured stress is exactly the one that is changing the momentum in a system
 
-![Plot of mid channel control volume with  momentum conservation shown](https://github.com/edwardsmith999/QM_MoP/blob/[branch]/image.jpg?raw=true)
+![Plot of mid channel control volume with  momentum conservation shown](https://github.com/edwardsmith999/QM_MoP/blob/main/figures/CV_stress_trace.png?raw=true)
 
 as well as energy, which validates the form of heat flux is exactly the one responsible for changing the energy in a volume
 
-![Plot of mid channel control volume with energy conservation shown](https://github.com/edwardsmith999/QM_MoP/blob/[branch]/image.jpg?raw=true)
+![Plot of mid channel control volume with energy conservation shown](https://github.com/edwardsmith999/QM_MoP/blob/main/figures/CV_energy_trace.png?raw=true)
