@@ -11,10 +11,6 @@ from scipy.optimize import curve_fit
 from numba import jit, njit, prange
 from e3nn.util import jit
 
-#this should be version from 
-#https://github.com/edwardsmith999/ase
-#which makes minor changes to interface to get fij
-sys.path.insert(1, '/home/es205/codes/ase')
 from ase import units
 from ase.md.verlet import VelocityVerlet
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
@@ -28,8 +24,7 @@ from ase.optimize import BFGS
 #This should be version from https://github.com/edwardsmith999/mace
 #currently, which adapts and adds fij support
 sys.path.insert(1, '/home/es205/codes/MACE/mace/')
-from mace.calculators import MACECalculator, mace_anicc
-from mace.calculators import foundations_models as fd
+from mace.calculators import MACECalculator
 
 
 def printenergy(a, t):
