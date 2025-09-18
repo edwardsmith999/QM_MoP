@@ -8,6 +8,12 @@ from scipy.stats import binned_statistic
 from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import curve_fit
 
+from ase import units
+from ase.md.verlet import VelocityVerlet
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
+from ase.io import read, write, vasp
+from ase.calculators.calculator import PropertyNotImplementedError
+
 try:
     from numba import njit
     NUMBA_AVAILABLE = True
@@ -24,32 +30,6 @@ def optional_njit(*njit_args, **njit_kwargs):
             return func
         return wrapper
 
-from ase import units
-from ase.md.verlet import VelocityVerlet
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
-from ase.md.nose_hoover_chain import NoseHooverChainNVT
-from ase.constraints import FixAtoms
-from ase.geometry import get_distances
-from ase.io import read, write, vasp
-from ase.md import MDLogger
-from ase.optimize import BFGS
-
-#This should be version from https://github.com/edwardsmith999/mace
-#currently, which adapts and adds fij support
-import os
-if not os.path.isdir('MACE'):
-    try:
-        print("Attempting to clone custom MACE version from GitHub edwardsmith999/mace")
-        from git import Repo
-        Repo.clone_from("https://github.com/edwardsmith999/mace", "MACE")
-    except ImportError:
-        raise ImportError("Download failed - need custom version of MACE from edwardsmith999")
-
-#This hacky local file import works well as it prevents changing system mace 
-sys.path.insert(1, os.path.abspath("./MACE"))
-import mace
-assert mace.__file__ == os.path.abspath("./MACE") + "/mace/__init__.py"
-from mace.calculators import MACECalculator
 
 def printenergy(a, t):
     """Function to print the potential, kinetic and total energy"""
@@ -143,10 +123,16 @@ def bin_MD(r, A, Nbins=10, Lz=1., mask=None):
         raise ValueError("Unsupported array shape for binning.")
 
 
+def get_force_lowlevel(atoms, pairwise=True):
 
-def get_force(atoms, pairwise=True):
+    """
+        A low level call to get force per atom
+        using an explict autograd operation
+    """
 
-    #A low level call to get force per atom
+    if maceversion != "custom":
+        raise ImportError("Version of mace must be custom from edwardsmith999 to use this low level interface")
+
     model = atoms.calc.models[0]
     batch_base = atoms.calc._atoms_to_batch(atoms)
     batch = atoms.calc._clone_batch(batch_base)
@@ -173,23 +159,92 @@ def get_force(atoms, pairwise=True):
 
         return forces
 
+
+def get_atom_potential_energies(atoms):
+
+    try:
+        #Only implemented currently in custom version
+        PE = atoms.get_potential_energies()
+    except PropertyNotImplementedError:
+        #Otherwise get e0 energy and subtract from node energy
+        batch_base = atoms.calc._atoms_to_batch(atoms)
+        batch = atoms.calc._clone_batch(batch_base)
+        node_heads = batch["head"][batch["batch"]]
+        num_atoms_arange = torch.arange(batch["positions"].shape[0])
+        node_e0 = atoms.calc.models[0].atomic_energies_fn(batch["node_attrs"])[
+            num_atoms_arange, node_heads
+        ]
+        PE = atoms.calc.results["node_energy"]+node_e0.cpu().numpy()
+
+    return PE
+
+
+#Define all simulation parameters here
 AtomDict = {"Zr":40, "O":8, "H":1}
 
+nsteps = 20
 Nbins = 400
 savefreq = 1
 Nevery = 1
+
 timing = False
 checks = False
-outdir = "./results/"
 read_vasp = False
-dynamics = "custom" # "verlet" or "custom"
-Tset = 500
+
+outdir = "./results/"
+modelpath = "./foundation_models/"
+
+dynamics = "leapfrog" # "verlet" or "leapfrog"
+maceversion = "custom" #system or "custom"
+fijtype = "dUdrij"   # "dUidrj" or "dUdrij"
+
+Tset = 500 #Temperature
 dt = 0.5
-fijcalc = "inMACE"
 
+if maceversion == "custom":
+    #This should be version from https://github.com/edwardsmith999/mace
+    #currently, which adapts and adds fij support
+    #This version is adapted from MACE release 0.3.11
+    #and seems to require the following to work with acceleration
+    #cuequivariance-torch==0.3.0 and e3nn==0.4.4
+    import os
+    if not os.path.isdir('MACE'):
+        try:
+            print("Attempting to clone custom MACE version from GitHub edwardsmith999/mace")
+            from git import Repo
+            Repo.clone_from("https://github.com/edwardsmith999/mace", "MACE")
+        except ImportError:
+            raise ImportError("Download failed - need custom version of MACE from edwardsmith999")
 
-#Start from VASP file to start or initial state
-#which is equilibrated with velocities applied
+    #This hacky local file import works well as it prevents changing system mace 
+    sys.path.insert(1, os.path.abspath("./MACE"))
+    import mace
+    assert mace.__file__ == os.path.abspath("./MACE") + "/mace/__init__.py"
+    from mace.calculators import MACECalculator
+    calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
+                          device='cuda', 
+                          enable_cueq=True,          #These only work with cuequivariance-torch==0.3.0 and e3nn==0.4.4
+                          compile_mode="default")   
+    tols = 1e-8 #Runs at 64 bit so more accurate
+
+elif maceversion == "system":
+
+    #We require later than MACE version 0.3.13 for stresses, otherwise custom version used
+    import mace
+    assert (int(mace.__version__.split(".")[2]) >= 13 and 
+            int(mace.__version__.split(".")[1]) >= 3 and
+            int(mace.__version__.split(".")[0]) >= 0)
+    #Should be able to use installed system MACE here
+    from mace.calculators import mace_mp
+    calc = mace_mp(model=modelpath+"mace-mpa-0-medium.model",
+                   device="cuda",
+                   compute_atomic_stresses=True, 
+                   compute_edge_forces=True,
+                   default_dtype="float32")
+    tols = 1e-2
+
+#Start from Yang et al VASP file or ASE format initial state
+#which has already been equilibrated with velocities applied
 if read_vasp:
     atoms = vasp.read_vasp("water_ZrO2_initial_doubled.vasp")
     MaxwellBoltzmannDistribution(atoms, temperature_K=Tset)
@@ -205,21 +260,17 @@ pbc = atoms.pbc
 Lz = cell[2][2]
 binrange = np.linspace(0, Lz, Nbins)
 
-#Define mace calculator
-modelpath = "./foundation_models/"
-atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
-                          device='cuda', 
-                          enable_cueq=True, 
-                          compile_mode="default")
+#Set atom to mace calculator
+atoms.calc = calc
 
 #Dynamics
 if dynamics == "verlet":
     dyn = VelocityVerlet(atoms, dt*units.fs)
-else:
+elif "leapfrog":
     #We'll do this explicitly instead
     dyn = None
 
-# Now run the dynamics
+# Write initial data
 atoms.write(outdir+'mace_run.xyz', append=False)
 printenergy(atoms, 0)
 
@@ -234,7 +285,6 @@ energy_MOP_hist = []
 Pcbins = []
 Pkbins = []
 
-nsteps = 80
 Fdotv = np.zeros(nsteps)
 dE_dt = np.zeros(nsteps)
 
@@ -246,16 +296,19 @@ r = atoms.get_positions()
 mv = atoms.get_momenta()
 v = np.array([mv[:,i]/m for i in range(3)]).T
 KE = 0.5*m*np.sum(v**2, axis=1)
-PE = atoms.get_potential_energies()
+PE = get_atom_potential_energies(atoms)
 E = KE + PE
 
-
+#Now run the dynamics
 for t in range(nsteps):
 
     #Save before next step
     if t % savefreq == 0:
         #print("Writing backup at step", t)
-        atoms.write(outdir+'mace_run.xyz', append=True)
+        try:
+            atoms.write(outdir+'mace_run.xyz', append=True)
+        except ValueError:
+            pass
         np.save(outdir+f"MOPstress_c_hist.npy", np.array(MOPstress_c_hist))
         np.save(outdir+f"MOPstress_k_hist.npy", np.array(MOPstress_k_hist))
         np.save(outdir+f"Pcbins.npy", np.array(Pcbins))
@@ -267,14 +320,16 @@ for t in range(nsteps):
         np.save(outdir+f"MOPenergy_k_hist.npy", np.array(MOPenergy_k_hist))
         np.save(outdir+f"energy_MOP_hist.npy", np.array(energy_MOP_hist))
 
-    t0 = time.time()
+    if timing:
+        t0 = time.time()
+
     #Replace dyn with this
     if dynamics == "verlet":
         r_prev = r.copy()  # Save previous positions before updating
         mv_prev = mv.copy() # Save previous momentum
         E_prev = E.copy() # Save previous energy
         dyn.run(1)
-    else:
+    elif "leapfrog":
         #Time integration
         E_prev = E.copy() # Save previous energy
         f = atoms.get_forces()
@@ -316,36 +371,44 @@ for t in range(nsteps):
 
     #Kinetic Energy/Temperature
     KE = 0.5*m*np.sum(v**2, axis=1)
-    PE = atoms.get_potential_energies()
+    PE = get_atom_potential_energies(atoms)
     E = KE + PE
     dE_dt[t] = np.sum((E - E_prev) / (dt * units.fs))
 
-    nmol = 10
-
     #Check sum of local temperature adds to total
     assert abs(atoms.get_temperature() - 2.*np.sum(KE) / (3 * N * units.kB)) < 1e-5
-    assert abs(atoms.get_potential_energy() - np.sum(PE)) < 1e-5
+    assert abs(atoms.get_potential_energy() - np.sum(PE)) < tols
 
     #With adapted MACE, we get fij force (note atoms.calc.mixer.calcs[0] 
     #if using dispersion but this will fail to provide force balance)
-    if fijcalc == "inMACE":
-        fij = 2.0*atoms.calc.results["fij"]
-        fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
-        fij[:,:,1] = 0.5*(fij[:,:,1] - fij[:,:,1].T)
-        fij[:,:,2] = 0.5*(fij[:,:,2] - fij[:,:,2].T)
-        assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
+    if fijtype == "dUdrij":
+        if maceversion == "custom":
+            fij = 2.0*atoms.calc.results["fij"]
+            fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
+            fij[:,:,1] = 0.5*(fij[:,:,1] - fij[:,:,1].T)
+            fij[:,:,2] = 0.5*(fij[:,:,2] - fij[:,:,2].T)
 
-        fijvi = np.zeros([fij.shape[0], fij.shape[1]])
-        fijvi[:,:] = ( fij[:,:,0]*v_next[:,0] 
-                      +fij[:,:,1]*v_next[:,1] 
-                      +fij[:,:,2]*v_next[:,2])
+        #This version work with  MACE 0.3.14 as it gets fij from edge_forces
+        #however it uses hidden functions like "calc._atoms_to_batch"
+        #which might change in updates to MACE. 
+        elif maceversion == "system":
 
-    #This version might work with an unedited MACE as it gets fij from
-    #outside, however it uses hidden functions like "calc._atoms_to_batch"
-    #which might change in updates to MACE (tested with MACE version 0.3.11). 
-    elif fijcalc == "use_function":
-        fij = get_force(atoms, pairwise=True)
-        assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
+            #A low level call to get force per atom
+            model = atoms.calc.models[0]
+            batch_base = atoms.calc._atoms_to_batch(atoms)
+            batch = atoms.calc._clone_batch(batch_base)
+            out = model(batch.to_dict(), compute_stress=True, compute_edge_forces=True, training=True)
+            grad_rij = out["edge_forces"]
+            dense = torch.zeros((N, N, grad_rij.shape[1]), device=grad_rij.device, dtype=grad_rij.dtype)
+            sender, receiver = batch["edge_index"]
+            dense[sender, receiver] = grad_rij
+
+            fij = -2.0*dense.to("cpu").detach().numpy()
+            fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
+            fij[:,:,1] = 0.5*(fij[:,:,1] - fij[:,:,1].T)
+            fij[:,:,2] = 0.5*(fij[:,:,2] - fij[:,:,2].T)
+
+        assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < tols
 
         fijvi = np.zeros([fij.shape[0], fij.shape[1]])
         fijvi[:,:] = ( fij[:,:,0]*v_next[:,0] 
@@ -354,7 +417,7 @@ for t in range(nsteps):
 
     #A much slower version of force used for energy conservation
     # but gives the correct energy CV equations and so heat flux
-    elif fijcalc == "dUidrj":
+    elif fijtype == "dUidrj":
         model = atoms.calc.models[0]
         batch_base = atoms.calc._atoms_to_batch(atoms)
         batch = atoms.calc._clone_batch(batch_base)
@@ -379,7 +442,6 @@ for t in range(nsteps):
         #fij = -(dUidrj - dUidrj.transpose(1, 0, 2))
         #assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
 
-
         fij = -2.*dUidrj
         fijvi = np.zeros([fij.shape[0], fij.shape[1]])
         fijvi[:,:] = -2.*(  dUidrj[:,:,0]*v_next[:,0] 
@@ -387,7 +449,7 @@ for t in range(nsteps):
                           + dUidrj[:,:,2]*v_next[:,2])
 
     else:
-        raise IOError("fijcalc should be inMACE, use_function or dUidrj")
+        raise IOError("maceversion should be Custom or >0.3.13")
 
 
     ########################################################
@@ -435,7 +497,6 @@ for t in range(nsteps):
                          - np.sign(z_planes[b] - r[i, 2])) 
                 MOPstress_k[b] += mv[i] * cross
                 MOPenergy_k[b] += E[i]  * cross 
-
 
     MOPstress_k_hist.append(MOPstress_k)
     MOPenergy_k_hist.append(MOPenergy_k)
@@ -523,20 +584,22 @@ Pi_IK1_k = np.array(Pkbins)
 
 c = 2
 
-#Plot Pzz as function of z - Fig 2
-plt.plot(np.mean(Pi_c[:,:,c],0), label="$\Pi^c_{_{MOP}}$")
-plt.plot(-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi^k_{_{MOP}}$")
-plt.plot(np.mean(Pi_c[:,:,c],0)-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi_{_{MOP}}$")
+#Only worth plotting spatial values on long runs
+if nsteps > 1000:
+    #Plot Pzz as function of z - Fig 2
+    plt.plot(np.mean(Pi_c[:,:,c],0), label="$\Pi^c_{_{MOP}}$")
+    plt.plot(-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi^k_{_{MOP}}$")
+    plt.plot(np.mean(Pi_c[:,:,c],0)-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi_{_{MOP}}$")
 
-plt.plot(np.mean(Pi_IK1_c[:,:,c],0), '--', label="$\Pi^c_{_{IK1}}$")
-plt.plot(-np.mean(Pi_IK1_k[:,:,c],0), '--', label="$\Pi^k_{_{IK1}}$")
-plt.plot(np.mean(Pi_IK1_c[:,:,c],0)-np.mean(Pi_IK1_k[:,:,c],0), '--', label="$\Pi_{_{IK1}}$")
-plt.legend()
-plt.show()
+    plt.plot(np.mean(Pi_IK1_c[:,:,c],0), '--', label="$\Pi^c_{_{IK1}}$")
+    plt.plot(-np.mean(Pi_IK1_k[:,:,c],0), '--', label="$\Pi^k_{_{IK1}}$")
+    plt.plot(np.mean(Pi_IK1_c[:,:,c],0)-np.mean(Pi_IK1_k[:,:,c],0), '--', label="$\Pi_{_{IK1}}$")
+    plt.legend()
+    plt.show()
 
 #Plot CV time evolution if results taken every timestep - Fig 3
 if Nevery == 1:
-    binno = 210
+    binno = 150
     ixyz = 0
     fig, axs = plt.subplots(2,1)
     Fds_c = Pi_c[:,binno+1,ixyz]-Pi_c[:,binno,ixyz]
@@ -571,7 +634,7 @@ if Nevery == 1:
     axs[0].plot(Fds_c[:-2]-dmvdt[:-1]-Fds_k[1:-1]/units.fs, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
 
-    axs[1].plot(Eds_c[:-1], '--', zorder=4, label="$f_{ij} v_i$"); 
+    axs[1].plot(0.5*(Eds_c[1:]+Eds_c[:-1]), '--', zorder=4, label="$f_{ij} v_i$"); 
     axs[1].plot(dedt[:]+Eds_k[1:]/units.fs, label=r"$\frac{d}{dt} \rho e_i - e_i v_i$"); 
     axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
