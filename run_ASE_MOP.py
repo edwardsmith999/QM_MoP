@@ -8,8 +8,21 @@ from scipy.stats import binned_statistic
 from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import curve_fit
 
-from numba import jit, njit, prange
-from e3nn.util import jit
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    print("Failed to import Numba, MoP routines should still run but much slower")
+    NUMBA_AVAILABLE = False
+
+def optional_njit(*njit_args, **njit_kwargs):
+    if NUMBA_AVAILABLE:
+        return njit(*njit_args, **njit_kwargs)
+    else:
+        # fallback: just return function unchanged
+        def wrapper(func):
+            return func
+        return wrapper
 
 from ase import units
 from ase.md.verlet import VelocityVerlet
@@ -141,7 +154,8 @@ def plot_fij_from_tensor(ax, positions, fij_tensor,
         ax[1].scatter(interactingmols[:, 0], interactingmols[:, 2], c='k', s=50, zorder=5)
 
 
-@njit(fastmath=True, cache=True)
+#@njit(fastmath=True, cache=True)
+@optional_njit(fastmath=True, cache=True)
 def get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins, threshold=1e-7):
     """
     Simple Numba version 
