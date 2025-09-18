@@ -64,96 +64,6 @@ def printenergy(a, t):
            epot + ekin, np.sum(f[:,0]*v[:,0]+f[:,1]*v[:,1]+f[:,2]*v[:,2])))
 
 
-
-def get_bins_and_planes(z1, z2, Lz, Nbins, pbc=True):
-    """
-    Get bin indices and planes crossed when going from z1 to z2.
-    
-    Parameters:
-    ----------
-    z1, z2 : float
-        Start and end positions
-    Lz : float
-        System size in z direction
-    Nbins : int
-        Number of bins
-    pbc : bool
-        Whether to use periodic boundary conditions
-        
-    Returns:
-    -------
-    i1, i2 : int
-        Bin indices of z1 and z2
-    crossed : ndarray
-        Array of bin indices crossed when going from z1 to z2
-    """
-    # Bin indices
-    dz = Lz / Nbins
-    i1, i2 = np.floor_divide([z1, z2], dz).astype(int)
-    
-    if pbc:
-        # Calculate direct distance and wraparound distance
-        direct_delta = (i2 - i1) % Nbins
-        wrap_delta   = (i1 - i2) % Nbins
-        
-        if direct_delta <= wrap_delta:
-            # Direct path is shorter or equal
-            direction = -1
-            crossed = np.arange(i1 + 1, i1 + direct_delta + 1) % Nbins
-        else:
-            # Wraparound path is shorter
-            direction = 1
-            crossed = np.arange(i1, i1 - wrap_delta, -1) % Nbins
-    else:
-        # Without PBC, just go from min to max
-        if i1 <= i2:
-            crossed = np.arange(i1 + 1, i2 + 1)
-        else:
-            crossed = np.arange(i2, i1)
-            
-    return i1, i2, crossed, direction
-
-def plot_fij_from_tensor(ax, positions, fij_tensor, 
-                         moli=[300], threshold=1e-4, scale=10.0):
-
-    n_atoms = positions.shape[0]
-
-    # Plot atom positions
-    if  ax.name == "3d":
-        ax.scatter(positions[:, 0], positions[:, 1], positions[:, 2], c='k', s=3, zorder=2)
-    else:
-        ax[0].scatter(positions[:, 0], positions[:, 1], c='k', s=3, zorder=2)
-        ax[1].scatter(positions[:, 0], positions[:, 2], c='k', s=3, zorder=2)
-    interactingmols = []
-    for i in moli:
-        ri = positions[i]
-        interactingmols.append(ri)
-        for j in range(1, n_atoms):
-            fij = fij_tensor[i, j]
-            norm_f = np.linalg.norm(fij)
-            if norm_f > threshold:
-                rj = positions[j]
-                interactingmols.append(rj)
-                if  ax.name == "3d":
-                    ax.plot([ri[0], rj[0]], [ri[1], rj[1]], [ri[2], rj[2]],
-                            color='red', alpha=0.6)
-                else:
-                    ax[0].plot([ri[0], rj[0]], [ri[1], rj[1]],
-                            #linewidth=scale * norm_f,
-                            color='red', alpha=0.6)
-                    ax[1].plot([ri[0], rj[0]], [ri[2], rj[2]],
-                            #linewidth=scale * norm_f,
-                            color='red', alpha=0.6)
-
-
-    interactingmols = np.array(interactingmols)
-    if  ax.name == "3d":
-        ax.scatter(interactingmols[:, 0], interactingmols[:, 1], interactingmols[:, 2], c='k', s=50, zorder=5)
-    else:
-        ax[0].scatter(interactingmols[:, 0], interactingmols[:, 1], c='k', s=50, zorder=5)
-        ax[1].scatter(interactingmols[:, 0], interactingmols[:, 2], c='k', s=50, zorder=5)
-
-
 #@njit(fastmath=True, cache=True)
 @optional_njit(fastmath=True, cache=True)
 def get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins, threshold=1e-7):
@@ -280,7 +190,6 @@ walltop = 11
 #Start from VASP file to start or initial state
 #which is equilibrated with velocities applied
 if read_vasp:
-    #atoms = vasp.read_vasp("water_ZrO2_initial_doubled_byhand.vasp")
     atoms = vasp.read_vasp("water_ZrO2_initial_doubled.vasp")
     MaxwellBoltzmannDistribution(atoms, temperature_K=Tset)
     #Remove drift velocity
@@ -358,8 +267,6 @@ for t in range(nsteps):
         np.save(outdir+f"MOPenergy_k_hist.npy", np.array(MOPenergy_k_hist))
         np.save(outdir+f"energy_MOP_hist.npy", np.array(energy_MOP_hist))
 
-
-
     t0 = time.time()
     #Replace dyn with this
     if dynamics == "verlet":
@@ -411,18 +318,16 @@ for t in range(nsteps):
     KE = 0.5*m*np.sum(v**2, axis=1)
     PE = atoms.get_potential_energies()
     E = KE + PE
-
     dE_dt[t] = np.sum((E - E_prev) / (dt * units.fs))
 
     nmol = 10
-    #print(t, "energy of nmol", nmol, KE[nmol], PE[nmol], E[nmol], np.dot(f[nmol], v[nmol]))
 
     #Check sum of local temperature adds to total
     assert abs(atoms.get_temperature() - 2.*np.sum(KE) / (3 * N * units.kB)) < 1e-5
     assert abs(atoms.get_potential_energy() - np.sum(PE)) < 1e-5
 
     #With adapted MACE, we get fij force (note atoms.calc.mixer.calcs[0] 
-    #if using dispersion) but this will fail to provide force balance
+    #if using dispersion but this will fail to provide force balance)
     if fijcalc == "inMACE":
         fij = 2.0*atoms.calc.results["fij"]
         fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
@@ -435,6 +340,9 @@ for t in range(nsteps):
                       +fij[:,:,1]*v_next[:,1] 
                       +fij[:,:,2]*v_next[:,2])
 
+    #This version might work with an unedited MACE as it gets fij from
+    #outside, however it uses hidden functions like "calc._atoms_to_batch"
+    #which might change in updates to MACE (tested with MACE version 0.3.11). 
     elif fijcalc == "use_function":
         fij = get_force(atoms, pairwise=True)
         assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
@@ -444,6 +352,8 @@ for t in range(nsteps):
                       +fij[:,:,1]*v_next[:,1] 
                       +fij[:,:,2]*v_next[:,2])
 
+    #A much slower version of force used for energy conservation
+    # but gives the correct energy CV equations and so heat flux
     elif fijcalc == "dUidrj":
         model = atoms.calc.models[0]
         batch_base = atoms.calc._atoms_to_batch(atoms)
@@ -464,11 +374,12 @@ for t in range(nsteps):
         #Copy to CPU and delete GPU
         dUidrj = dUidrj.cpu().numpy()
         
-        #This ensures Newton's 3rd law but is not consistent with energy        
+        #This ensures Newton's 3rd law but is not 
+        #consistent with energy conservation form       
         #fij = -(dUidrj - dUidrj.transpose(1, 0, 2))
         #assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
 
-        #This won't pass the assert but is consistent with energy term
+
         fij = -2.*dUidrj
         fijvi = np.zeros([fij.shape[0], fij.shape[1]])
         fijvi[:,:] = -2.*(  dUidrj[:,:,0]*v_next[:,0] 
