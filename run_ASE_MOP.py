@@ -182,10 +182,11 @@ timing = False
 checks = False
 outdir = "./results/"
 read_vasp = False
-dynamics = "custom" # "verlet" #"NH",
+dynamics = "custom" # "verlet" or "custom"
 Tset = 500
 dt = 0.5
-walltop = 11
+fijcalc = "inMACE"
+
 
 #Start from VASP file to start or initial state
 #which is equilibrated with velocities applied
@@ -215,7 +216,7 @@ atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model",
 if dynamics == "verlet":
     dyn = VelocityVerlet(atoms, dt*units.fs)
 else:
-    #We'll do this by hand instead
+    #We'll do this explicitly instead
     dyn = None
 
 # Now run the dynamics
@@ -248,7 +249,6 @@ KE = 0.5*m*np.sum(v**2, axis=1)
 PE = atoms.get_potential_energies()
 E = KE + PE
 
-fijcalc = "inMACE"
 
 for t in range(nsteps):
 
@@ -450,7 +450,6 @@ for t in range(nsteps):
     ##############################
 
     #Optimized numba
-    #t41 = time.time();# print("Config direct=", t41-t40)
     r_z = r[:, 2].astype(np.float64)  # Extract z-coordinates
 
     MOPstress_c, MOPenergy_c = get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins)
@@ -565,12 +564,11 @@ if Nevery == 1:
     plt.show()
 
     #Plot just forces vs. d/dt with kinetic parts removed
-
     fig, axs = plt.subplots(2,1)
 
-    axs[0].plot(Fds_c[:-1], '--', zorder=4, label="$\Pi^c$"); 
-    axs[0].plot(dmvdt[:]+Fds_k[1:]/units.fs, label=r"$\frac{d}{dt} \rho u -\Pi^k$"); 
-    axs[0].plot(Fds_c[:-1]-dmvdt[:]-Fds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
+    axs[0].plot(Fds_c[:-2], '--', zorder=4, label="$\Pi^c$"); 
+    axs[0].plot(dmvdt[:-1]+Fds_k[1:-1]/units.fs, label=r"$\frac{d}{dt} \rho u -\Pi^k$"); 
+    axs[0].plot(Fds_c[:-2]-dmvdt[:-1]-Fds_k[1:-1]/units.fs, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
 
     axs[1].plot(Eds_c[:-1], '--', zorder=4, label="$f_{ij} v_i$"); 
@@ -578,6 +576,12 @@ if Nevery == 1:
     axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
     plt.show()
+
+    #Note if you use verlet time integrator, values stored on timestep
+    #so you need to shift plots by halfstep
+    #tm = np.linspace(0,(nsteps-1)*dt,Fds_c.shape[0])
+    #plt.plot(tm, Fds_c)
+    #plt.plot(tm[:-1]+dt/2., dmvdt)
 
 
 
