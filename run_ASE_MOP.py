@@ -23,9 +23,20 @@ from ase.optimize import BFGS
 
 #This should be version from https://github.com/edwardsmith999/mace
 #currently, which adapts and adds fij support
-sys.path.insert(1, '/home/es205/codes/MACE/mace/')
-from mace.calculators import MACECalculator
+import os
+if not os.path.isdir('MACE'):
+    try:
+        print("Attempting to clone custom MACE version from GitHub edwardsmith999/mace")
+        from git import Repo
+        Repo.clone_from("https://github.com/edwardsmith999/mace", "MACE")
+    except ImportError:
+        raise ImportError("Download failed - need custom version of MACE from edwardsmith999")
 
+#This hacky local file import works well as it prevents changing system mace 
+sys.path.insert(1, os.path.abspath("./MACE"))
+import mace
+assert mace.__file__ == os.path.abspath("./MACE") + "/mace/__init__.py"
+from mace.calculators import MACECalculator
 
 def printenergy(a, t):
     """Function to print the potential, kinetic and total energy"""
@@ -130,97 +141,8 @@ def plot_fij_from_tensor(ax, positions, fij_tensor,
         ax[1].scatter(interactingmols[:, 0], interactingmols[:, 2], c='k', s=50, zorder=5)
 
 
-def compute_config_stress(r, fij, Lz, Nbins):
-    """
-    Most optimized version using advanced NumPy indexing
-    """
-    # Find all non-zero force pairs
-    nonzero_mask = np.abs(fij[:, :, 0]) > 1e-7
-    i_indices, j_indices = np.where(nonzero_mask)
-    
-    if len(i_indices) == 0:
-        return
-
-    MOPstress_c = np.zeros((Nbins, 3))
-    
-    # Pre-compute all bin crossings and accumulate
-    dz = Lz / Nbins
-    z1_vals = r[i_indices, 2]
-    z2_vals = r[j_indices, 2]
-    
-    bini = np.floor_divide(z1_vals, dz).astype(int)
-    binj = np.floor_divide(z2_vals, dz).astype(int)
-    
-    # For each valid pair, accumulate stress contributions
-    for idx in range(len(i_indices)):
-        i, j = i_indices[idx], j_indices[idx]
-        
-        # Quick bin crossing calculation (simplified for PBC case)
-        i1, i2 = bini[idx], binj[idx]
-        direct_delta = (i2 - i1) % Nbins
-        wrap_delta = (i1 - i2) % Nbins
-        
-        if direct_delta <= wrap_delta:
-            direction = -1
-            if direct_delta > 0:
-                crossings = np.arange(i1 + 1, i1 + direct_delta + 1) % Nbins
-                MOPstress_c[crossings, :] += 0.5 * fij[i, j, :] * direction
-        else:
-            direction = 1
-            if wrap_delta > 0:
-                crossings = np.arange(i1, i1 - wrap_delta, -1) % Nbins
-                MOPstress_c[crossings, :] += 0.5 * fij[i, j, :] * direction
-
-    return MOPstress_c
-
-
 @njit(fastmath=True, cache=True)
-def compute_config_stress_numba(r_z, fij, Lz, Nbins, threshold=1e-7):
-    """
-    Simple Numba version 
-    Returns MOPstress_c array
-    """
-    n_atoms = r_z.shape[0]
-    n_dims = fij.shape[2]
-    MOPstress_c = np.zeros((Nbins+1, n_dims))  # +1 for safety
-    dz = Lz / Nbins
-    
-    for i in range(n_atoms):
-        for j in range(n_atoms):
-            # Check threshold first
-            force_magnitude = fij[i, j, 0]
-            if force_magnitude > threshold or force_magnitude < -threshold:
-                z1, z2 = r_z[i], r_z[j]
-                
-                # Compute bin indices using floor division
-                i1 = np.int32(z1 / dz)  # Use division instead of floor division
-                i2 = np.int32(z2 / dz)
-                
-                # Handle periodic boundary conditions
-                direct_delta = (i2 - i1) % Nbins
-                wrap_delta = (i1 - i2) % Nbins
-                
-                if direct_delta <= wrap_delta:
-                    direction = -1
-                    # Add contributions to crossed bins
-                    for k in range(direct_delta):
-                        bin_idx = (i1 + 1 + k) % Nbins
-                        for dim in range(n_dims):
-                            MOPstress_c[bin_idx, dim] += 0.5 * fij[i, j, dim] * direction
-
-                else:
-                    direction = 1
-                    for k in range(wrap_delta):
-                        bin_idx = (i1 - k) % Nbins
-                        for dim in range(n_dims):
-                            MOPstress_c[bin_idx, dim] += 0.5 * fij[i, j, dim] * direction
-
-
-    return MOPstress_c 
-
-
-@njit(fastmath=True, cache=True)
-def compute_config_stress_power_numba(r_z, fij, fijvi, Lz, Nbins, threshold=1e-7):
+def get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins, threshold=1e-7):
     """
     Simple Numba version 
     Returns MOPstress_c array
@@ -360,7 +282,7 @@ Lz = cell[2][2]
 binrange = np.linspace(0, Lz, Nbins)
 
 #Define mace calculator
-modelpath = "./foundations_models/"
+modelpath = "./foundation_models/"
 atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
                           device='cuda', 
                           enable_cueq=True, 
@@ -606,7 +528,7 @@ for t in range(nsteps):
     #t41 = time.time();# print("Config direct=", t41-t40)
     r_z = r[:, 2].astype(np.float64)  # Extract z-coordinates
 
-    MOPstress_c, MOPenergy_c = compute_config_stress_power_numba(r_z, fij, fijvi, Lz, Nbins)
+    MOPstress_c, MOPenergy_c = get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins)
 
     MOPstress_c_hist.append(MOPstress_c)
     MOPenergy_c_hist.append(MOPenergy_c)
