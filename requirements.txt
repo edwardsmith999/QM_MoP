@@ -1,7 +1,7 @@
 ase
 cuequivariance
-cuequivariance_torch
-e3nn
+cuequivariance-torch==0.3.0
+e3nn==0.4.4
 fpsample
 GitPython
 h5py
