@@ -8,7 +8,7 @@ The Method of Planes (MoP) is a pressure measurement used in molecular dynamics 
 
 The validaity of this approach is demonstrated by showing the MoP pressure respects static equilibirum near a liquid-solid interface (a test which the virial or IK1 form fails),
 
-![Plot of near wall pressure](https://github.com/edwardsmith999/QM_MoP/blob/main/figures/stress_in_channel.png)
+<img src="https://github.com/edwardsmith999/QM_MoP/blob/main/figures/stress_in_channel.png" width="40%">
 
 It also shows conservation in an arbitary control volume between two planes (a test for validity that can be used in any system)m 
 for momentum, which validates the measured stress is exactly the one that is changing the momentum in a system
