@@ -182,7 +182,7 @@ def get_atom_potential_energies(atoms):
 #Define all simulation parameters here
 AtomDict = {"Zr":40, "O":8, "H":1}
 
-nsteps = 20
+nsteps = 100
 Nbins = 400
 savefreq = 1
 Nevery = 1
@@ -199,7 +199,7 @@ maceversion = "custom" #system or "custom"
 fijtype = "dUdrij"   # "dUidrj" or "dUdrij"
 
 Tset = 500 #Temperature
-dt = 0.5
+dt = 0.5 * units.fs
 
 if maceversion == "custom":
     #This should be version from https://github.com/edwardsmith999/mace
@@ -265,7 +265,7 @@ atoms.calc = calc
 
 #Dynamics
 if dynamics == "verlet":
-    dyn = VelocityVerlet(atoms, dt*units.fs)
+    dyn = VelocityVerlet(atoms, dt)
 elif "leapfrog":
     #We'll do this explicitly instead
     dyn = None
@@ -335,13 +335,13 @@ for t in range(nsteps):
         f = atoms.get_forces()
         Fdotv[t] = np.sum(np.einsum('ij,ij->i', f, v))
         mv_prev = mv.copy() # Save previous momentum
-        mv += dt*units.fs * f
+        mv += dt * f
 
         atoms.set_momenta(mv)
         r_prev = r.copy() # Save previous positions before updating
-        r[:,0] += dt*units.fs * mv[:,0]/m[:]
-        r[:,1] += dt*units.fs * mv[:,1]/m[:]
-        r[:,2] += dt*units.fs * mv[:,2]/m[:]
+        r[:,0] += dt * mv[:,0]/m[:]
+        r[:,1] += dt * mv[:,1]/m[:]
+        r[:,2] += dt * mv[:,2]/m[:]
         atoms.set_positions(r)
 
     #Skip unless Nevery
@@ -362,7 +362,7 @@ for t in range(nsteps):
 
     #Get v at half timestep for power calculation
     f = atoms.get_forces()
-    mv_next = mv + 0.5*dt*units.fs * f
+    mv_next = mv + 0.5 * dt * f
     v_next = np.array([mv_next[:,i]/m for i in range(3)]).T
 
     #Remove drift velocity
@@ -373,7 +373,7 @@ for t in range(nsteps):
     KE = 0.5*m*np.sum(v**2, axis=1)
     PE = get_atom_potential_energies(atoms)
     E = KE + PE
-    dE_dt[t] = np.sum((E - E_prev) / (dt * units.fs))
+    dE_dt[t] = np.sum((E - E_prev) / dt)
 
     #Check sum of local temperature adds to total
     assert abs(atoms.get_temperature() - 2.*np.sum(KE) / (3 * N * units.kB)) < 1e-5
@@ -495,8 +495,8 @@ for t in range(nsteps):
                 # If sign changes (crossing occurred), add momentum contribution
                 cross = (  np.sign(z_planes[b] - r_prev[i, 2]) 
                          - np.sign(z_planes[b] - r[i, 2])) 
-                MOPstress_k[b] += mv[i] * cross
-                MOPenergy_k[b] += E[i]  * cross 
+                MOPstress_k[b] += 0.5 * mv[i] * cross
+                MOPenergy_k[b] += 0.5 * E[i]  * cross 
 
     MOPstress_k_hist.append(MOPstress_k)
     MOPenergy_k_hist.append(MOPenergy_k)
@@ -588,8 +588,8 @@ c = 2
 if nsteps > 1000:
     #Plot Pzz as function of z - Fig 2
     plt.plot(np.mean(Pi_c[:,:,c],0), label="$\Pi^c_{_{MOP}}$")
-    plt.plot(-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi^k_{_{MOP}}$")
-    plt.plot(np.mean(Pi_c[:,:,c],0)-np.mean(Pi_k[:,:,c],0)/units.fs, label="$\Pi_{_{MOP}}$")
+    plt.plot(-np.mean(Pi_k[:,:,c],0)/dt, label="$\Pi^k_{_{MOP}}$")
+    plt.plot(np.mean(Pi_c[:,:,c],0)-np.mean(Pi_k[:,:,c],0)/dt, label="$\Pi_{_{MOP}}$")
 
     plt.plot(np.mean(Pi_IK1_c[:,:,c],0), '--', label="$\Pi^c_{_{IK1}}$")
     plt.plot(-np.mean(Pi_IK1_k[:,:,c],0), '--', label="$\Pi^k_{_{IK1}}$")
@@ -604,24 +604,24 @@ if Nevery == 1:
     fig, axs = plt.subplots(2,1)
     Fds_c = Pi_c[:,binno+1,ixyz]-Pi_c[:,binno,ixyz]
     Fds_k = Pi_k[:,binno+1,ixyz]-Pi_k[:,binno,ixyz]
-    dmvdt = np.diff(np.array(mv_MOP_hist)[:,binno,ixyz])/(dt*units.fs)
+    dmvdt = np.diff(np.array(mv_MOP_hist)[:,binno,ixyz])/dt
 
     #Plot CV time evolution
     axs[0].plot(Fds_c[:-1], '--', zorder=4, label="$\Pi^c$"); 
-    axs[0].plot(Fds_k[1:]/units.fs, label="$\Pi^k$"); 
+    axs[0].plot(Fds_k[1:]/dt, label="$\Pi^k$"); 
     axs[0].plot(dmvdt[:], label=r"$\frac{d}{dt} \rho u $"); 
-    axs[0].plot(Fds_c[:-1]-dmvdt[:]-Fds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
+    axs[0].plot(Fds_c[:-1]-dmvdt[:]-Fds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
 
     #Plot CV energy time evolution
     Eds_c = E_c[:,binno+1,0]-E_c[:,binno,0]
     Eds_k = E_k[:,binno+1,0]-E_k[:,binno,0]
-    dedt = np.diff(np.array(energy_MOP_hist)[:,binno])/(dt*units.fs)
+    dedt = np.diff(np.array(energy_MOP_hist)[:,binno])/dt
 
     axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:]), '--', zorder=4, label="$f_{ij} v_i$"); 
-    axs[1].plot(Eds_k[1:]/units.fs, label="$e_i v_i$"); 
+    axs[1].plot(Eds_k[1:]/dt, label="$e_i v_i$"); 
     axs[1].plot(dedt[:], label=r"$\frac{d}{dt} \rho e_i $"); 
-    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
+    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
     axs[1].set_ylim([-1.5,1.5])
     plt.show()
@@ -630,13 +630,13 @@ if Nevery == 1:
     fig, axs = plt.subplots(2,1)
 
     axs[0].plot(Fds_c[:-2], '--', zorder=4, label="$\Pi^c$"); 
-    axs[0].plot(dmvdt[:-1]+Fds_k[1:-1]/units.fs, label=r"$\frac{d}{dt} \rho u -\Pi^k$"); 
-    axs[0].plot(Fds_c[:-2]-dmvdt[:-1]-Fds_k[1:-1]/units.fs, "k", lw=0.5, label=r"Sum"); 
+    axs[0].plot(dmvdt[:-1]+Fds_k[1:-1]/dt, label=r"$\frac{d}{dt} \rho u -\Pi^k$"); 
+    axs[0].plot(Fds_c[:-2]-dmvdt[:-1]-Fds_k[1:-1]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
 
     axs[1].plot(0.5*(Eds_c[1:]+Eds_c[:-1]), '--', zorder=4, label="$f_{ij} v_i$"); 
-    axs[1].plot(dedt[:]+Eds_k[1:]/units.fs, label=r"$\frac{d}{dt} \rho e_i - e_i v_i$"); 
-    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/units.fs, "k", lw=0.5, label=r"Sum"); 
+    axs[1].plot(dedt[:]+Eds_k[1:]/dt, label=r"$\frac{d}{dt} \rho e_i - e_i v_i$"); 
+    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
     plt.show()
 
