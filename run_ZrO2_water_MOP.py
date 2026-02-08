@@ -17,7 +17,7 @@ from utils import printenergy,  get_atom_potential_energies, check_torque_conser
 #Define all simulation parameters here
 AtomDict = {"Zr":40, "O":8, "H":1}
 
-nsteps = 10
+nsteps = 100
 Nbins = 400
 savefreq = 1
 Nevery = 1
@@ -32,7 +32,7 @@ intialfiles = "./initial_states/"
 
 dynamics = "leapfrog" # "verlet" or "leapfrog"
 maceversion = "system" #system or "custom"
-fijtype = "dUdrij"   # "dUidrj" or "dUdrij"
+fijtype = "dUdrij"   # "dUidrj" or "dUdrij", note dUidrj is very slow
 
 Tset = 500 #Temperature
 dt = 0.5 * units.fs

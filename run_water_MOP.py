@@ -27,13 +27,6 @@ if maceversion == "system":
     assert (int(mace.__version__.split(".")[2]) >= 13 and 
             int(mace.__version__.split(".")[1]) >= 3 and
             int(mace.__version__.split(".")[0]) >= 0)
-    #Should be able to use installed system MACE here
-    from mace.calculators import mace_mp
-    calc = mace_mp(model=modelpath+"mace-mpa-0-medium.model",
-                   device="cuda",
-                   compute_atomic_stresses=True, 
-                   compute_edge_forces=True,
-                   default_dtype="float32")
     tols = 1e-2
 elif maceversion == "custom":
     #This should be version from https://github.com/edwardsmith999/mace
@@ -96,7 +89,7 @@ atoms.wrap()
 N = len(atoms)
 
 #Define mace calculator
-modelpath = './foundations_models/'
+modelpath = './foundation_models/'
 atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
                             device='cuda', default_dtype="float32",
                             enable_cueq=True, #Previously worked with cuequivariance-torch==0.3.0 and e3nn==0.4.4
