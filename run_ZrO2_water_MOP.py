@@ -4,185 +4,20 @@ import time
 import matplotlib.pyplot as plt
 import sys
 
-from scipy.stats import binned_statistic
-from scipy.spatial.distance import pdist, squareform
-from scipy.optimize import curve_fit
-
 from ase import units
 from ase.md.verlet import VelocityVerlet
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 from ase.io import read, write, vasp
-from ase.calculators.calculator import PropertyNotImplementedError
 
-try:
-    from numba import njit
-    NUMBA_AVAILABLE = True
-except ImportError:
-    print("Failed to import Numba, MoP routines should still run but much slower")
-    NUMBA_AVAILABLE = False
-
-def optional_njit(*njit_args, **njit_kwargs):
-    if NUMBA_AVAILABLE:
-        return njit(*njit_args, **njit_kwargs)
-    else:
-        # fallback: just return function unchanged
-        def wrapper(func):
-            return func
-        return wrapper
-
-
-def printenergy(a, t):
-    """Function to print the potential, kinetic and total energy"""
-    epot = a.get_potential_energy() / len(a)
-    ekin = a.get_kinetic_energy() / len(a)
-    f = a.get_forces()
-    m = a.get_masses()
-    mv = a.get_momenta()
-    v = np.array([mv[:,i]/m for i in range(3)]).T
-    print(t, 'Energy per atom: Epot = %.7f eV  Ekin = %.7f eV (T=%3.0fK)  '
-          'Etot = %.7f eV sum Fi vi = %.7f eV' % (epot, ekin, ekin / (1.5 * units.kB), 
-           epot + ekin, np.sum(f[:,0]*v[:,0]+f[:,1]*v[:,1]+f[:,2]*v[:,2])))
-
-
-#@njit(fastmath=True, cache=True)
-@optional_njit(fastmath=True, cache=True)
-def get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins, threshold=1e-7):
-    """
-    Simple Numba version 
-    Returns MOPstress_c array
-    """
-    n_atoms = r_z.shape[0]
-    n_dims = fij.shape[2]
-    MOPstress_c = np.zeros((Nbins+1, n_dims))  # +1 for safety
-    #Add power for energy calculation
-    MOPpower_c = np.zeros((Nbins+1,1))  # +1 for safety
-    dz = Lz / Nbins
-    
-    for i in range(n_atoms):
-        for j in range(n_atoms):
-            # Check threshold first
-            force_magnitude = fij[i, j, 0]
-            if force_magnitude > threshold or force_magnitude < -threshold:
-                z1, z2 = r_z[i], r_z[j]
-                
-                # Compute bin indices using floor division
-                i1 = np.int32(z1 / dz)  # Use division instead of floor division
-                i2 = np.int32(z2 / dz)
-                
-                # Handle periodic boundary conditions
-                direct_delta = (i2 - i1) % Nbins
-                wrap_delta = (i1 - i2) % Nbins
-                
-                if direct_delta <= wrap_delta:
-                    direction = -1
-                    # Add contributions to crossed bins
-                    for k in range(direct_delta):
-                        bin_idx = (i1 + 1 + k) % Nbins
-                        for dim in range(n_dims):
-                            MOPstress_c[bin_idx, dim] += 0.5 * fij[i, j, dim] * direction
- 
-                        MOPpower_c[bin_idx] += 0.5 * fijvi[i,j] * direction
-                else:
-                    direction = 1
-                    for k in range(wrap_delta):
-                        bin_idx = (i1 - k) % Nbins
-                        for dim in range(n_dims):
-                            MOPstress_c[bin_idx, dim] += 0.5 * fij[i, j, dim] * direction
-
-                        MOPpower_c[bin_idx] += 0.5 * fijvi[i,j] * direction
-
-    return MOPstress_c, MOPpower_c
-
-def bin_MD(r, A, Nbins=10, Lz=1., mask=None):
-    """
-    Bin a given input array A (e.g., mass, kinetic energy, momentum, etc.) based on the z-coordinates.
-    
-    Parameters:
-    r      : (N, 3) array of atomic positions.
-    A      : Input array (e.g., mass, KE, momentum). The shape determines how to bin it.
-    Nbins  : Number of bins (default: 10).
-    Lz     : Length of the system in the z-direction (default: 1.0).
-    mask   : Boolean array selecting the atoms to include. If None, includes all atoms.
-    
-    Returns:
-    Binned array corresponding to A.
-    """
-    if mask is None:
-        mask = np.ones(r.shape[0], dtype=bool)
-    
-    if A.ndim == 1:
-        # Scalar quantity (e.g., mass, KE, PE)
-        return binned_statistic(r[mask, 2], A[mask], statistic='sum', bins=Nbins, range=[0, Lz]).statistic
-    elif A.ndim == 2:
-        # Vector quantity (e.g., momentum, pressure tensor)
-        return np.array([
-            binned_statistic(r[mask, 2], A[mask, j], statistic='sum', bins=Nbins, range=[0, Lz]).statistic
-            for j in range(A.shape[1])
-        ]).T
-    else:
-        raise ValueError("Unsupported array shape for binning.")
-
-
-def get_force_lowlevel(atoms, pairwise=True):
-
-    """
-        A low level call to get force per atom
-        using an explict autograd operation
-    """
-
-    if maceversion != "custom":
-        raise ImportError("Version of mace must be custom from edwardsmith999 to use this low level interface")
-
-    model = atoms.calc.models[0]
-    batch_base = atoms.calc._atoms_to_batch(atoms)
-    batch = atoms.calc._clone_batch(batch_base)
-    out = model(batch.to_dict(), compute_stress=True, training=True)
-    total_energy = out['energy'].sum()  # or sum of node energies
-    if pairwise:
-        rij = out["vectors"]
-        grad_rij = torch.autograd.grad(total_energy, rij, retain_graph=True)[0]
-        dense = torch.zeros((N, N, grad_rij.shape[1]), device=grad_rij.device, dtype=grad_rij.dtype)
-        sender, receiver = batch["edge_index"]
-        dense[sender, receiver] = grad_rij
-
-        fij = -2.0*dense.to("cpu").numpy()
-        fij[:,:,0] = 0.5*(fij[:,:,0] - fij[:,:,0].T)
-        fij[:,:,1] = 0.5*(fij[:,:,1] - fij[:,:,1].T)
-        fij[:,:,2] = 0.5*(fij[:,:,2] - fij[:,:,2].T)
-
-        if checks:
-            assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
-        return fij
-    else:
-        positions = batch['positions'].requires_grad_(True)
-        forces = -torch.autograd.grad(total_energy, positions, retain_graph=True)[0]
-
-        return forces
-
-
-def get_atom_potential_energies(atoms):
-
-    try:
-        #Only implemented currently in custom version
-        PE = atoms.get_potential_energies()
-    except PropertyNotImplementedError:
-        #Otherwise get e0 energy and subtract from node energy
-        batch_base = atoms.calc._atoms_to_batch(atoms)
-        batch = atoms.calc._clone_batch(batch_base)
-        node_heads = batch["head"][batch["batch"]]
-        num_atoms_arange = torch.arange(batch["positions"].shape[0])
-        node_e0 = atoms.calc.models[0].atomic_energies_fn(batch["node_attrs"])[
-            num_atoms_arange, node_heads
-        ]
-        PE = atoms.calc.results["node_energy"]+node_e0.cpu().numpy()
-
-    return PE
-
+from MOP import get_MOP_kinetic, get_MOP_stress_power, bin_MD
+from MOP import reconstruct_and_plot
+from MOP import reconstruct_energy_flux_ref
+from utils import printenergy,  get_atom_potential_energies, check_torque_conservation
 
 #Define all simulation parameters here
 AtomDict = {"Zr":40, "O":8, "H":1}
 
-nsteps = 100
+nsteps = 10
 Nbins = 400
 savefreq = 1
 Nevery = 1
@@ -193,9 +28,10 @@ read_vasp = False
 
 outdir = "./results/"
 modelpath = "./foundation_models/"
+intialfiles = "./initial_states/"
 
 dynamics = "leapfrog" # "verlet" or "leapfrog"
-maceversion = "custom" #system or "custom"
+maceversion = "system" #system or "custom"
 fijtype = "dUdrij"   # "dUidrj" or "dUdrij"
 
 Tset = 500 #Temperature
@@ -246,12 +82,12 @@ elif maceversion == "system":
 #Start from Yang et al VASP file or ASE format initial state
 #which has already been equilibrated with velocities applied
 if read_vasp:
-    atoms = vasp.read_vasp("water_ZrO2_initial_doubled.vasp")
+    atoms = vasp.read_vasp(intialfiles+"water_ZrO2.vasp")
     MaxwellBoltzmannDistribution(atoms, temperature_K=Tset)
     #Remove drift velocity
     Stationary(atoms)
 else:
-    atoms = read("500K.traj")
+    atoms = read(intialfiles+"water_ZrO2.traj")
 
 #Get system sizes
 N = len(atoms)
@@ -448,24 +284,55 @@ for t in range(nsteps):
                           + dUidrj[:,:,1]*v_next[:,1] 
                           + dUidrj[:,:,2]*v_next[:,2])
 
+    elif fijtype == "dUidrj_opt":
+        from torch.func import jacrev
+
+        model = atoms.calc.models[0]
+        batch_base = atoms.calc._atoms_to_batch(atoms)
+        batch_dict = batch_base.to_dict()
+        positions = batch_dict['positions'] # The input we want to differentiate wrt
+
+        # 2. Define a functional wrapper
+        def get_node_energies(pos):
+            # Create a shallow copy of the batch dict to avoid side-effects
+            # and inject the 'pos' tensor (which will be a Tracer during jacrev)
+            batch_input = batch_dict.copy()
+            batch_input['positions'] = pos
+            
+            # Run the model
+            # We re-run the forward pass here so jacrev can trace it.
+            # Note: training=True handles things like Dropout/BatchNorm if present.
+            out = model(batch_input, compute_stress=False, compute_force=False, training=True)
+            
+            # Ensure output is 1D (N,) so jacrev produces a (N, N, 3) tensor.
+            # If out["node_energy"] is (N, 1), the result would be (N, 1, N, 3).
+            return out["node_energy"].squeeze()
+
+        # 3. Compute the Jacobian using jacrev
+        # This replaces the entire loop.
+        # Output shape: (N_output, N_input, 3) -> (N, N, 3)
+        dUidrj = jacrev(get_node_energies)(positions)
+
+        #Copy to CPU and delete GPU
+        dUidrj = dUidrj.cpu().numpy()
+        
+        #This ensures Newton's 3rd law but is not 
+        #consistent with energy conservation form       
+        #fij = -(dUidrj - dUidrj.transpose(1, 0, 2))
+        #assert np.sum(np.abs(np.sum(fij,0) - atoms.calc.results["forces"])) < 1e-8
+
+        fij = -2.*dUidrj
+        fijvi = np.zeros([fij.shape[0], fij.shape[1]])
+        fijvi[:,:] = -2.*(  dUidrj[:,:,0]*v_next[:,0] 
+                          + dUidrj[:,:,1]*v_next[:,1] 
+                          + dUidrj[:,:,2]*v_next[:,2])
+
     else:
-        raise IOError("maceversion should be Custom or >0.3.13")
-
-
-    ########################################################
-
-    ########################################################
+        raise IOError("maceversion should be Custom or your installed system version >0.3.13")
 
     if timing:
         t2 = time.time()
         print("Get fij time=", t2-t1)
-
-    #Define a range of Nplanes evenly spaced planes in z direction (r[:,2]) 
-    #filling the domain and create 
-    #an array of size MOPstress(Nplanes, 3) for them
-    Nplanes = Nbins+1
-    dz = Lz / Nbins
-    z_planes = np.arange(Nplanes)*dz 
 
     # Get total momentum change of particles between planes (should bin this but need to check vs. mvbins)
     mv_MOP_planes = bin_MD(r, mv, Nbins, Lz)
@@ -478,25 +345,9 @@ for t in range(nsteps):
     # MOP kinetic calculation 
     # P^k(t) = \sum_i \boldsymbol{v}_{i} (t) (sgn(z_p - z_i(t+dt)) - sgn(z_p - z_i(t)))
     ##############################
-    MOPstress_k = np.zeros((Nplanes, 3))
-    MOPenergy_k = np.zeros((Nplanes, 1))
-    # Determine plane crossings and calculate momentum contributions
-    for i in range(len(r)):
-        # Get min and max plane so can only check
-        # planes between the old and new positions
-        z_bin = np.digitize(r[i,2], bins=z_planes)-1
-        z_prev_bin = np.digitize(r_prev[i, 2], bins=z_planes)-1
 
-        # Check for crossings with each plane
-        if z_bin == z_prev_bin:
-            continue
-        else:
-            for b in (min(z_bin, z_prev_bin), max(z_bin, z_prev_bin)):
-                # If sign changes (crossing occurred), add momentum contribution
-                cross = (  np.sign(z_planes[b] - r_prev[i, 2]) 
-                         - np.sign(z_planes[b] - r[i, 2])) 
-                MOPstress_k[b] += 0.5 * mv[i] * cross
-                MOPenergy_k[b] += 0.5 * E[i]  * cross 
+    Nplanes = Nbins+1
+    MOPstress_k, MOPenergy_k = get_MOP_kinetic(r, r_prev, mv, E, Lz, Nplanes)
 
     MOPstress_k_hist.append(MOPstress_k)
     MOPenergy_k_hist.append(MOPenergy_k)
@@ -513,7 +364,7 @@ for t in range(nsteps):
     #Optimized numba
     r_z = r[:, 2].astype(np.float64)  # Extract z-coordinates
 
-    MOPstress_c, MOPenergy_c = get_MOP_stress_power(r_z, fij, fijvi, Lz, Nbins)
+    MOPstress_c, MOPenergy_c = get_MOP_stress_power(r_z, fij, fijvi, Lz, Nplanes)
 
     MOPstress_c_hist.append(MOPstress_c)
     MOPenergy_c_hist.append(MOPenergy_c)
@@ -549,6 +400,9 @@ for t in range(nsteps):
                 print("Forces in empty bins", binno, Fds[binno])
 
         #Forces when a single molecule is in bin equal to forces over planes either side
+        Nplanes = Nbins+1
+        dz = Lz / Nbins
+        z_planes = np.arange(Nplanes)*dz 
         binnos = np.where(Nbin == 1)
         F = atoms.calc.results["forces"]
         for binno in binnos[0]:
@@ -575,12 +429,20 @@ for t in range(nsteps):
 #Convert to arrays
 Pi_c = np.array(MOPstress_c_hist)
 Pi_k = np.array(MOPstress_k_hist)
+mv_bin = np.array(mv_MOP_hist)
 
-E_c = np.array(MOPenergy_c_hist)
-E_k = np.array(MOPenergy_k_hist)
+E_c = np.array(MOPenergy_c_hist).squeeze()
+E_k = np.array(MOPenergy_k_hist).squeeze()
+E_bin = np.array(energy_MOP_hist)
+dEdt = np.diff(E_bin, axis=0)/dt
 
 Pi_IK1_c = np.array(Pcbins)
 Pi_IK1_k = np.array(Pkbins)
+
+#Save data if slow to get
+#if fijtype == "dUidrj":
+#    import pickle
+#    pickle.dump([MOPstress_c_hist, MOPstress_k_hist, MOPenergy_c_hist, MOPenergy_k_hist, energy_MOP_hist, Pcbins, Pkbins], open("duidrj.p", "bw+"))
 
 c = 2
 
@@ -614,14 +476,14 @@ if Nevery == 1:
     plt.legend()
 
     #Plot CV energy time evolution
-    Eds_c = E_c[:,binno+1,0]-E_c[:,binno,0]
-    Eds_k = E_k[:,binno+1,0]-E_k[:,binno,0]
+    Eds_c = E_c[:,binno+1]-E_c[:,binno]
+    Eds_k = E_k[:,binno+1]-E_k[:,binno]
     dedt = np.diff(np.array(energy_MOP_hist)[:,binno])/dt
 
-    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:]), '--', zorder=4, label="$f_{ij} v_i$"); 
+    axs[1].plot(Eds_c[:-1] , '--', zorder=4, label="$f_{ij} v_i$"); 
     axs[1].plot(Eds_k[1:]/dt, label="$e_i v_i$"); 
     axs[1].plot(dedt[:], label=r"$\frac{d}{dt} \rho e_i $"); 
-    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
+    axs[1].plot(Eds_c[:-1] -dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
     axs[1].set_ylim([-1.5,1.5])
     plt.show()
@@ -634,9 +496,9 @@ if Nevery == 1:
     axs[0].plot(Fds_c[:-2]-dmvdt[:-1]-Fds_k[1:-1]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
 
-    axs[1].plot(0.5*(Eds_c[1:]+Eds_c[:-1]), '--', zorder=4, label="$f_{ij} v_i$"); 
+    axs[1].plot(Eds_c[:-1], '--', zorder=4, label="$f_{ij} v_i$"); 
     axs[1].plot(dedt[:]+Eds_k[1:]/dt, label=r"$\frac{d}{dt} \rho e_i - e_i v_i$"); 
-    axs[1].plot(0.5*(Eds_c[:-1] + Eds_c[1:])-dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
+    axs[1].plot(Eds_c[:-1] -dedt[:]-Eds_k[1:]/dt, "k", lw=0.5, label=r"Sum"); 
     plt.legend()
     plt.show()
 
@@ -647,5 +509,36 @@ if Nevery == 1:
     #plt.plot(tm[:-1]+dt/2., dmvdt)
 
 
+    ############################
+    # Try reconstruction method
+    ############################
 
+    #Momentum reconstruction
+    Pi_c_recon, mom_consv = reconstruct_and_plot(mv_bin[:,:,ixyz], -Pi_k[:,:,ixyz], dt, plottype="Momentum", binno=binno, ref=Pi_c[:,:,ixyz])
+
+    #Conservation errors near wall throw agreement, try just in center
+    Pi_c_recon = reconstruct_energy_flux_ref(mv_bin[:,100:300,ixyz], -Pi_k[:,100:301,ixyz], dt, reference=Pi_c[:,100,ixyz], periodic=False)
+    plt.plot(Pi_c_recon[49,:], 'r-')
+    plt.plot(Pi_c[49,100:301,0], 'b--')
+    plt.show()
+
+    plt.plot(Pi_c_recon[:,100], 'r-')
+    plt.plot(Pi_c[:,200,0], 'b--')
+    plt.show()
+
+    #Energy reconstruction
+    E_c_recon, E_consv = reconstruct_and_plot(E_bin, -E_k, dt, binno=binno, ref=E_c)
+
+    Eds_c = E_c[:,1:]-E_c[:,:-1]
+    Eds_k = E_k[:,1:]-E_k[:,:-1]
+    bI = dEdt[:,:]+Eds_k[1:,:]/dt
+
+    E_c_recon = reconstruct_energy_flux_ref(E_bin[:,100:300], -E_k[:,100:301], dt, reference=E_c[:,100], periodic=False)
+    plt.plot(E_c_recon[49,:], 'r-')
+    plt.plot(E_c[49,100:301], 'b--')
+    plt.show()
+
+    plt.plot(E_c_recon[:,100], 'r-')
+    plt.plot(E_c[:,200], 'b--')
+    plt.show()
 
