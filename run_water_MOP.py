@@ -21,9 +21,11 @@ from_voigt = np.array([[0, 5, 4], [5, 1, 3], [4, 3, 2]])
 to_voigt = [[0, 1, 2, 1, 0, 0], [0, 1, 2, 2, 2, 1]]
 maceversion = "system"
 if maceversion == "system":
-    sys.path.insert(0, "/home/es205/codes/MACE/mace_development/mace_current")
+    #Nothing to do here as using system version
 elif maceversion == "custom":
-    sys.path.insert(0, "/home/es205/codes/MACE/mace")
+    #This probably won't work as is, intended to show version to use
+    os.system("git clone https://github.com/edwardsmith999/mace")
+    sys.path.insert(0, "./mace")
 else:
     pass
 from mace.calculators import MACECalculator
