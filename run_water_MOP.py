@@ -21,13 +21,43 @@ from_voigt = np.array([[0, 5, 4], [5, 1, 3], [4, 3, 2]])
 to_voigt = [[0, 1, 2, 1, 0, 0], [0, 1, 2, 2, 2, 1]]
 maceversion = "system"
 if maceversion == "system":
-    #Nothing to do here as using system version
+
+    #We require later than MACE version 0.3.13 for stresses, otherwise custom version used
+    import mace
+    assert (int(mace.__version__.split(".")[2]) >= 13 and 
+            int(mace.__version__.split(".")[1]) >= 3 and
+            int(mace.__version__.split(".")[0]) >= 0)
+    #Should be able to use installed system MACE here
+    from mace.calculators import mace_mp
+    calc = mace_mp(model=modelpath+"mace-mpa-0-medium.model",
+                   device="cuda",
+                   compute_atomic_stresses=True, 
+                   compute_edge_forces=True,
+                   default_dtype="float32")
+    tols = 1e-2
 elif maceversion == "custom":
-    #This probably won't work as is, intended to show version to use
-    os.system("git clone https://github.com/edwardsmith999/mace")
-    sys.path.insert(0, "./mace")
+    #This should be version from https://github.com/edwardsmith999/mace
+    #currently, which adapts and adds fij support
+    #This version is adapted from MACE release 0.3.11
+    #and seems to require the following to work with acceleration
+    #cuequivariance-torch==0.3.0 and e3nn==0.4.4
+    import os
+    if not os.path.isdir('MACE'):
+        try:
+            print("Attempting to clone custom MACE version from GitHub edwardsmith999/mace")
+            from git import Repo
+            Repo.clone_from("https://github.com/edwardsmith999/mace", "MACE")
+        except ImportError:
+            raise ImportError("Download failed - need custom version of MACE from edwardsmith999")
+
+    #This hacky local file import works well as it prevents changing system mace 
+    sys.path.insert(1, os.path.abspath("./MACE"))
+    import mace
+    assert mace.__file__ == os.path.abspath("./MACE") + "/mace/__init__.py"
+    tols = 1e-8 #Runs at 64 bit so more accurate
 else:
     pass
+
 from mace.calculators import MACECalculator
 
 AtomDict = {"O":8, "H":1}
@@ -66,7 +96,7 @@ atoms.wrap()
 N = len(atoms)
 
 #Define mace calculator
-modelpath = '/home/es205/codes/MACE/mace/mace/calculators/foundations_models/'
+modelpath = './foundations_models/'
 atoms.calc = MACECalculator(modelpath+"mace-mpa-0-medium.model", 
                             device='cuda', default_dtype="float32",
                             enable_cueq=True, #Previously worked with cuequivariance-torch==0.3.0 and e3nn==0.4.4
